@@ -1,0 +1,774 @@
+---
+title: "Actuarial Experience Studies and Assumption Setting in R"
+subtitle: "New York R Conference 2022"
+author: "Matt Heaphy, FSA, MAAA"
+date: "June 9, 2022"
+format: 
+  revealjs:
+    theme: [default, custom.scss]
+    transition: fade
+    slide-number: true
+    show-slide-number: speaker
+    title-slide-attributes:
+      data-background-color: "#005b9c"
+    self-contained: true
+    execute:
+      echo: false
+---
+
+
+## Agenda
+
+```{r setup}
+#| label: setup
+#| include: false
+
+library(tidymodels)
+library(gt)
+library(vip)
+library(gghighlight)
+library(lubridate)
+
+tidymodels_prefer()
+
+x <- 1.15
+plot_theme <- theme_light() + 
+  theme(strip.background = element_rect(fill = "#005b9c"),
+        axis.text = element_text(size = rel(x * 1.1)),
+        title = element_text(size = rel(x * 1.2)),
+        strip.text = element_text(size = rel(x)),
+        panel.background = element_rect(fill = "grey98"))
+theme_set(plot_theme)
+
+scale_color_nfg <- function(...) {
+  scale_color_manual(values = c("#005b9c", "#00a8b5", "#f3c71c"), ...)
+}
+
+census <- readRDS("data/census_data.rds")
+study_data2 <- readRDS("data/sim_data.rds")
+
+test_dat <- readRDS("data/sim_data_test.rds")
+test_census <- test_dat |> 
+  select(-q_exp) |> 
+  group_by(pol_num) |> 
+  filter(pol_yr == max(pol_yr)) |> 
+  ungroup() |> 
+  mutate(rex_yr = pmax(1, wd_age - age + 1))
+
+test_active <- filter(test_census, term == 0L)
+
+
+source("expact.R")
+
+```
+
+
+- Primer on actuaries and actuarial modeling
+- Experience studies with `dplyr`
+- Assumption setting with `tidymodels`
+- Measuring performance using actuarial models
+- Wrap-up
+
+::: aside
+The views herein are based on the speaker's experience and opinions only and do not represent the views of the Society of Actuaries or the American Academy of Actuaries. The data and analysis included in this presentation are theoretical only and contain simplifying assumptions that may not be true in the real world.
+:::
+
+
+<div data-background-color="#005b9c">
+# Actuaries and Actuarial Models
+</div>
+
+## What is an Actuary? {.smaller}
+
+. . .
+
+:::: {.columns}
+
+::: {.column width="50%"}
+
+> *An actuary is someone who uses statistics, financial mathematics, and deep domain expertise to quantify, price, and manage risks.*
+
+- One of the Original data professions
+- Typically practicing in insurance (life, health, P&C) and pensions
+- Society of Actuaries: 32K members worldwide^[<https://www.soa.org/about/total-membership/>]
+
+:::
+
+::: {.column width="50%"}
+![](images/exams.gif){fig-align="center"}
+:::
+
+::::
+
+
+
+
+
+## Actuarial Models
+
+> Actuarial Models are long term projection engines of cashflows, assets, and liabilities
+
+
+### Uses
+
+
+- Projections / planning
+- Valuation
+- Pricing
+- Risk management
+
+
+
+## Actuarial Present Value (APV) {.smaller}
+
+$$
+APV=\sum_{t=1}^{\Omega}v^t{}_{t-1}p_x^{\tau}(q_{x+t}^dDB_t+q_{x+t}^sSV_t+WD_t)
+$$
+
+- $v^t$ = discount factor, the value of $1 `t` years in the future, assuming a constant discount rate
+- $_{t}p_x^{\tau}$ = the probability that a policy issued at age `x` survives `t` years
+- $q_{x+t}^h$ = the probability that a policy age `x+t` expires due to hazard `h`
+- $DB_t$, $SV_t$, $WD_t$ = death, surrender, and withdrawal claim payments
+
+
+
+
+
+<div data-background-color="#005b9c">
+# Experience Studies
+
+
+</div>
+
+## Simulated Deferred Annuity Data
+
+
+**Topic**: predicting surrender rates on a deferred annuity product with an optional lifetime income benefit. 
+
+- **Training data**: `r nrow(census) |> scales::label_comma()()` policies (`r sum(census$term == 1L) |> scales::label_comma()()` surrendered)
+- **Test data**: `r nrow(test_census) |> scales::label_comma()()` policies (`r sum(test_census$term == 1L) |> scales::label_comma()()` surrendered)
+
+
+```{r}
+#| echo: true
+library(tidymodels)
+glimpse(census)
+```
+
+
+
+
+## Cross-Tab Example {.smaller}
+
+:::: {.columns}
+
+::: {.column width="40%"}
+
+- `pol_yr` = policy year
+- `claims` = # contract surrenders
+- `exposures` = # policy years exposed to the hazard (surrenders)
+- `q_obs` = Observed probability of surrender, `claims / exposures`
+- `q_exp` = Expected probability of surrender
+- `ae_q_exp` = Actual-to-expected ratio, `q_obs` / `q_exp`
+
+:::
+
+
+::: {.column width="60%"}
+
+```{r}
+
+study_data2 |> 
+  group_by(pol_yr) |> 
+  exp_stats("q_exp") |> 
+  head(11) |> 
+  cleanup()
+
+```
+
+:::
+
+::::
+
+
+
+
+## Creating Exposure Records
+
+
+:::: {.columns}
+
+::: {.column width="45%"}
+
+<center>
+### Census data
+</center>
+
+```{r}
+#' @description Convert a census data frame to an exposure data frame
+expose <- function(dat) {
+  dat |> 
+    slice(rep(row_number(), pol_yr)) |> 
+    group_by(pol_num) |> 
+    mutate(
+      term = ifelse(row_number() == pol_yr, term, 0),
+      pol_yr = row_number(),
+      age = age + pol_yr - 1) |> 
+    ungroup()
+}
+
+
+mini_census <- census[c(15, 10), ] |> 
+  mutate(pol_num = paste("Policy", row_number())) |> 
+  select(pol_num, pol_yr, age, term)
+
+mini_census |> 
+  gt(groupname_col = "pol_num") |> 
+  tab_options(table.font.size = pct(60))
+```
+
+
+:::
+
+::: {.column width="10%"}
+
+```{r, fig.align='center'}
+shiny::icon("long-arrow-alt-right")
+```
+
+:::
+
+::: {.column width="45%"}
+
+<center>
+### Exposed data
+</center>
+
+```{r}
+mini_census |> 
+  expose() |> 
+  gt(groupname_col = "pol_num") |> 
+  tab_options(table.font.size = pct(60))
+```
+
+
+:::
+
+::::
+
+
+---
+
+```{r}
+#| echo: true
+
+expose <- function(dat) {
+  dat |> 
+    slice(rep(row_number(), pol_yr)) |> 
+    group_by(pol_num) |> 
+    mutate(
+      term = ifelse(row_number() == pol_yr, term, 0),
+      pol_yr = row_number(),
+      age = age + pol_yr - 1) |> 
+    ungroup()
+}
+
+(study_data <- expose(census))
+```
+
+
+## Experience Summary Function
+
+```{r}
+#| echo: true
+#| output: false
+
+exp_stats <- function(dat, expected = FALSE) {
+  
+  dat %>% 
+    summarize(claims = sum(term),
+              exposures = n(),
+              q_obs = mean(term),
+              q_exp = if(expected) mean(q_exp) else NULL,
+              ae_q_exp = if(expected) q_exp / q_obs else NULL,
+              .groups = "drop")
+  
+}
+
+exp_stats(study_data2, expected = TRUE)
+```
+
+<br>
+
+```{r}
+exp_stats(study_data2, expected = TRUE) |> cleanup.exp_df(70)
+```
+
+
+
+
+---
+
+```{r}
+#| echo: true
+#| eval: false
+
+study_data2 |> group_by(pol_yr) |> 
+  exp_stats(expected = TRUE)
+```
+
+
+```{r}
+#| fig-align: center
+
+x <- study_data2 |> group_by(pol_yr) |> 
+  exp_stats(expected = TRUE)
+
+
+x |> ggplot(aes(pol_yr, q_obs)) + geom_point(size = 3) + geom_line() + 
+  labs(title = "Surrender Experience by Policy Year",
+       x = "Policy Year", y = "Observed Surrender Rate") + 
+  scale_y_continuous(labels = label_percent(accuracy = 2))
+```
+
+
+
+---
+
+```{r}
+#| echo: true
+#| eval: false
+
+study_data2 |> group_by(pol_yr, inc_guar) |> 
+  exp_stats(expected = TRUE)
+```
+
+
+```{r}
+#| fig-align: center
+
+x <- study_data2 |> 
+  group_by(pol_yr, inc_guar) |> 
+  exp_stats(expected = TRUE)
+
+
+x |> ggplot(aes(pol_yr, q_obs, color = inc_guar)) + 
+  geom_point(size = 3) + geom_line() + 
+  labs(title = "Surrender Experience by Policy Year and Income Guarantee",
+       x = "Policy Year", y = "Observed Surrender Rate") + 
+  scale_y_continuous(labels = label_percent(accuracy = 2)) +
+  theme(legend.position = "top") + 
+  scale_color_nfg()
+```
+
+
+
+## Variable Importance
+
+Variable importance plots can quickly highlight notable features that might otherwise have been missed.
+
+```{r}
+#| eval: false
+#| echo: true
+
+model_dat <- study_data2 |> 
+  mutate(term = as.factor(term))
+
+rf_rec <- recipe(term ~ ., data = model_dat) |> 
+  update_role(pol_num, q_exp, new_role = "ignore")
+
+rf_spec <- rand_forest() |> 
+  set_mode("classification") |> 
+  set_engine("ranger", importance = "impurity")
+
+rf_vip <- workflow(rf_rec, rf_spec) |> fit(model_dat)
+
+```
+
+
+
+---
+
+```{r}
+rf_vip <- readRDS("rf_vip.rds")
+model_dat <- study_data2 |> 
+  mutate(term = as.factor(term))
+```
+
+
+```{r}
+#| echo: true
+library(vip)
+rf_vip |> extract_fit_parsnip() |> vip()
+```
+
+
+
+<div data-background-color="#005b9c">
+# Assumption Setting
+
+
+</div>
+
+## Assumption Setting Methods
+
+> Goal: fit each model below and compare against observed experience and "correct" experience.
+
+1. Traditional Tabular Assumption
+1. Logistic Regression
+1. Random Forest
+
+
+
+## Traditional Tabular Assumptions
+
+- Start with experience studies
+- Apply judgment, smoothing, and topsides as needed
+
+```{r}
+#| echo: true
+trad_assump <- study_data |> group_by(pol_yr, inc_guar) |> exp_stats()
+```
+
+
+
+
+## Initial Assumption
+
+```{r}
+#| warning: false
+
+trad_assump |> 
+  complete(inc_guar, pol_yr = 1:25) |> 
+  ggplot(aes(pol_yr, q_obs, color = inc_guar)) + 
+  geom_point(size = 3) + geom_line() + 
+  labs(title = "Traditional Assumption",
+       x = "Policy Year", y = "Observed Surrender Rate") + 
+  scale_color_nfg() +
+  scale_y_continuous(labels = label_percent(accuracy = 2)) +
+  annotate("label", x = 20, y = 0.1, label = "What do we assume\n after year 15?",
+           color = "grey30")
+```
+
+
+
+
+## One Approach
+
+```{r}
+#| warning: false
+
+trad_assump |> 
+  complete(inc_guar, pol_yr = 1:25) |> 
+  mutate(observed = is.na(q_obs)) |> 
+  fill(q_obs) |> 
+  ggplot(aes(pol_yr, q_obs, color = inc_guar, 
+             lty = observed, shape = observed)) + 
+  geom_point(size = 3) + geom_line() + 
+  labs(title = "Naive Assumption",
+       x = "Policy Year", y = "Observed Surrender Rate") + 
+  guides(lty = NULL)  + 
+  scale_color_nfg() +
+  scale_y_continuous(labels = label_percent(accuracy = 2)) +
+  scale_shape_manual(values = c(16, 10))#+
+  #theme(text = element_text(size = 16))
+
+
+```
+
+
+
+## Logistic Regression
+
+```{r}
+#| echo: true
+#| eval: false
+
+log_spec <- logistic_reg() |> set_engine("glm")
+
+log_rec <- recipe(term ~ ., data = model_dat) |> 
+  update_role(pol_num, q_exp, new_role = "ignore") |> 
+  step_mutate(sc_group = case_when(
+    pol_yr <= 10 ~ "SC Period",
+    pol_yr == 11 ~ "Shock",
+    TRUE ~ "PostShock"
+  ) |> factor()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_ns(pol_yr, age, deg_free = 7) |> 
+  step_interact(terms = ~starts_with("sc_group"):starts_with("inc_guar")) |> 
+  step_interact(terms = ~starts_with("pol_yr"):starts_with("inc_guar")) |> 
+  step_interact(terms = ~starts_with("age"):starts_with("inc_guar"))
+  
+log_wf <- workflow(log_rec, log_spec)
+
+log_model <- fit(log_wf, model_dat)
+
+```
+
+```{r}
+# re-loading this script to get back the full version of exp_stats
+source("expact.R")
+
+log_model <- readRDS("models/log_model1_fit.rds")
+```
+
+
+
+
+## Performance
+
+
+```{r}
+log_plot <- model_dat |> 
+  bind_cols(predict(log_model, model_dat, type = "prob") |> 
+              select(q_mod = .pred_1)) |> 
+  group_by(pol_yr, inc_guar) |> 
+  exp_stats(c("q_exp", "q_mod")) |>
+  select(-starts_with("ae_")) |> 
+  pivot_longer(-(pol_yr:exposures), names_to = "basis", values_to = "value") |> 
+  ggplot(aes(pol_yr, value, color = basis)) + 
+  geom_point(size = 3) + geom_line() + facet_wrap(~inc_guar, scales = "free_y") + 
+  labs(title = "Unpenalized Logistic Regression",
+       x = "Policy Year",
+       y = "Surrender Probability") + 
+  scale_color_nfg() + 
+  scale_y_continuous(labels = label_percent(accuracy = 2))
+
+
+
+log_plot
+```
+
+
+
+## Random Forest
+
+```{r}
+#| echo: true
+#| eval: false
+
+rf_spec <- rand_forest() |> 
+  set_mode("classification") |> 
+  set_engine("ranger")
+
+rf_rec <- recipe(term ~ ., data = model_dat) |> 
+  update_role(pol_num, q_exp, new_role = "ignore") |> 
+  step_mutate(sc_group = case_when(
+    pol_yr <= 10 ~ "SC Period",
+    pol_yr == 11 ~ "Shock",
+    TRUE ~ "PostShock"
+  ) |> factor()) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_interact(terms = ~starts_with("sc_group"):starts_with("inc_guar")) |> 
+  step_interact(terms = ~starts_with("pol_yr"):starts_with("inc_guar"))
+
+rf_wf <- workflow(rf_rec, rf_spec)
+
+rf_model <- fit(rf_wf, model_dat)
+
+```
+
+```{r}
+rf_model <- readRDS("models/rf_wf_final.rds")
+```
+
+
+
+## Performance
+
+
+```{r}
+model_dat |> 
+  bind_cols(predict(rf_model, model_dat, type = "prob") |> 
+              select(q_mod = .pred_1)) |> 
+  group_by(pol_yr, inc_guar) |> 
+  exp_stats(c("q_exp", "q_mod")) |>
+  select(-starts_with("ae_")) |> 
+  pivot_longer(-(pol_yr:exposures), names_to = "basis", values_to = "value") |> 
+  ggplot(aes(pol_yr, value, color = basis)) + 
+  geom_point(size = 3) + geom_line() + facet_wrap(~inc_guar, scales = "free_y") + 
+  labs(title = "Random Forest",
+       x = "Policy Year",
+       y = "Surrender Probability") + 
+  scale_color_nfg() + 
+  scale_y_continuous(labels = label_percent(accuracy = 2))
+
+```
+
+
+
+
+
+<div data-background-color="#005b9c">
+# Actuarial Model Performance
+
+
+</div>
+
+## Process
+
+- Use the test data for active policies (`r nrow(test_active) |> scales::label_comma()()` records)
+- For each model:
+
+   - Generate predictions for future surrender probabilities
+   - Calculate actuarial present values
+   
+   $$
+   APV=\sum_{t=1}^{\Omega}v^t{}_{t-1}p_x^{\tau}(q_{x+t}^dDB_t+q_{x+t}^sSV_t+WD_t)
+   $$
+   
+- Compare performance against the "correct" assumption
+
+
+
+## Other Assumptions
+
+- Initial account value = $2,000
+- Annual withdrawals with income benefit = $100 for life
+- Annual withdrawals without income benefit = 5% of account value
+- Interest credited rate = 3%
+- Mortality = 2012 IAM Basic^[<https://mort.soa.org/ViewTable.aspx?&TableIdentity=2581>, <https://mort.soa.org/ViewTable.aspx?&TableIdentity=2582>]
+
+
+
+## Results
+
+- All Actual-to-expected ratios near 100%
+- Higher RMSE on the logistic model
+
+
+```{r}
+test_results <- readRDS("data/test_results.rds")
+test_results2 <- readRDS("data/test_results_v2.rds")
+
+assump_name <- function(x) {
+  case_when(
+    grepl("trad", x) ~ "Tabular",
+    grepl("rf", x) ~ "Random Forest",
+    grepl("log", x) ~ "Logistic"
+  )
+}
+
+ae_res <- ae_check_apv(test_results) |> 
+  pivot_longer(-apv_surr, 
+               names_to = c(".value", "Assumption"), names_sep = "_") |> 
+  mutate(Assumption = assump_name(Assumption),
+         `Abs Diff` = abs(apv - apv_surr)) |> 
+  rename(APV = apv, `A/E` = ae) |> 
+  select(-apv_surr)
+  
+  
+rmse_res <- rmse_check_apv(test_results) |> 
+  select(Assumption = name, RMSE = .estimate) |> 
+  mutate(Assumption = assump_name(Assumption))
+
+
+left_join(ae_res, rmse_res, by = "Assumption") |> 
+  gt() |> 
+  data_color(-Assumption,
+             color = scales::col_numeric(
+               paletteer::paletteer_d("dichromat::LightBluetoDarkBlue_7") |> 
+                 as.character(), domain = NULL)) |> 
+  fmt_percent(`A/E`, decimals = 1) |> 
+  fmt_currency(c(APV, `Abs Diff`), decimals = 0) |> 
+  tab_options(table.font.size = 32)
+```
+
+
+
+## Why is the Logistic Model an Outlier? {.smaller}
+
+- Poor fit to surrender rates after year 10
+- Extrapolation beyond year 15 is not accurate
+
+```{r}
+#| warning: false
+
+log_plot + 
+  gghighlight(pol_yr > 11, use_group_by = FALSE,
+              use_direct_label = FALSE,
+              calculate_per_facet = TRUE)
+```
+
+
+
+## Results v2
+
+- Applying a bit of post-processing judgment, we cap the `pol_yr` variable at 15
+- The logistic model now performs much better
+
+
+```{r}
+ae_res <- ae_check_apv(test_results2) |> 
+  pivot_longer(-apv_surr, 
+               names_to = c(".value", "Assumption"), names_sep = "_") |> 
+  mutate(Assumption = assump_name(Assumption),
+         `Abs Diff` = abs(apv - apv_surr)) |> 
+  rename(APV = apv, `A/E` = ae) |> 
+  select(-apv_surr)
+  
+  
+  
+rmse_res <- rmse_check_apv(test_results2) |> 
+  select(Assumption = name, RMSE = .estimate) |> 
+  mutate(Assumption = assump_name(Assumption))
+
+
+left_join(ae_res, rmse_res, by = "Assumption") |> 
+  gt() |> 
+  data_color(-Assumption,
+             color = scales::col_numeric(
+               paletteer::paletteer_d("dichromat::LightBluetoDarkBlue_7") |> 
+                 as.character(), domain = NULL)) |> 
+  fmt_percent(`A/E`, decimals = 1) |> 
+  fmt_currency(c(APV, `Abs Diff`), decimals = 0) |> 
+  tab_options(table.font.size = 32)
+```
+
+
+
+
+## Distribution of APV Residuals
+
+```{r}
+test_results2 |> 
+  select(inc_guar, starts_with("apv_")) |> 
+  mutate(across(-c(apv_surr, inc_guar), ~.x - apv_surr)) |> 
+  pivot_longer(-c(apv_surr, inc_guar), names_to = "assumption") |> 
+  mutate(assumption = assump_name(assumption)) |> 
+  ggplot(aes(value)) + 
+  geom_histogram(bins = 30) + 
+  facet_wrap( ~ assumption) + xlim(c(-10, 10)) + 
+  labs(x = "Difference from Correct APV") + 
+  geom_vline(color = "#00a8b5", lty = 2, xintercept = 0, lwd = 1.25) + 
+  scale_y_continuous(labels = label_comma())
+```
+
+
+
+<div data-background-color="#005b9c">
+# Wrap-Up
+
+
+</div>
+
+## Lessons
+
+- Modern tools like R and `tidymodels` save time and unlock deeper insights, resulting in more precise models.
+- Assumption setting should always consider downstream usage in actuarial models.
+
+
+---
+
+Expertise and professional judgment are still required!
+
+![](https://imgs.xkcd.com/comics/here_to_help.png)
+
+::: aside
+<https://xkcd.com/1831>
+:::
+
+
+<div data-background-color="#005b9c">
+# Thank you!
+</div>

@@ -1,0 +1,15 @@
+/*-- scss:defaults --*/
+
+// fonts
+$body-color: #2d303c !default;
+$presentation-heading-color: #005b9c;
+$code-block-bg: #e6e7e8;
+$border-color: #00a8b5;
+$code-block-border-color: #00a8b5;
+$code-color: #00a8b5;
+$presentation-h1-text-shadow: 3px 3px #2d303c;
+
+/*-- scss:rules --*/
+h1 {
+  text-align: center;
+}
