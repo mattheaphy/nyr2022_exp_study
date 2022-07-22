@@ -9,3 +9,4 @@ slides_cache
 data/study_data2.csv
 slides with notes.qmd
 images/nas*
+*.html
