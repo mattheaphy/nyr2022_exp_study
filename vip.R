@@ -9,7 +9,7 @@ model_dat <- study_data2 |>
   mutate(term = as.factor(term))
 
 rf_rec <- recipe(term ~ ., data = model_dat) |> 
-  update_role(pol_num, q_exp, new_role = "ignore")
+  step_rm(pol_num, q_exp)
 
 rf_spec <- rand_forest() |> 
   set_mode("classification") |> 

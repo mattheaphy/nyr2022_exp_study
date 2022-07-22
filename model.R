@@ -94,7 +94,7 @@ model_dat <- dat |>
   mutate(term = factor(term))
 
 log_rec <- recipe(term ~ ., data = model_dat) |> 
-  update_role(pol_num, q_exp, new_role = "ignore") |> 
+  step_rm(pol_num, q_exp) |> 
   step_mutate(sc_group = case_when(
     pol_yr <= 10 ~ "SC Period",
     pol_yr == 11 ~ "Shock",
@@ -134,7 +134,7 @@ rf_spec <- rand_forest() |>
   set_engine("ranger")
 
 rf_rec <- recipe(term ~ ., data = model_dat) |> 
-  update_role(pol_num, q_exp, new_role = "ignore") |> 
+  step_rm(pol_num, q_exp) |> 
   step_mutate(sc_group = case_when(
     pol_yr <= 10 ~ "SC Period",
     pol_yr == 11 ~ "Shock",
