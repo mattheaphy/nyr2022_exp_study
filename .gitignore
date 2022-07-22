@@ -4,7 +4,6 @@
 .Ruserdata
 *.rds
 *.Rproj
-*.html
 slides_files
 slides_cache
 data/study_data2.csv
